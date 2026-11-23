@@ -10,7 +10,7 @@ It exists because [Stow Web](https://github.com/mds08011/stow-web) cannot do thr
 
 This is a personal build installed through TestFlight. It is not on the App Store.
 
-**Status: scaffold.** The plain-logic package compiles and its tests pass. The app target has never been compiled, because it was written on a Linux machine. The first push to GitHub is its first compile. See [docs/plan.md](docs/plan.md).
+**Status: scaffold.** It compiles: the first push built the app unsigned on a macOS runner (Xcode 16.4) and passed the `StowCore` tests. It has never run on a device, because it is not signed yet. See [docs/plan.md](docs/plan.md).
 
 ## Layout
 

@@ -33,7 +33,7 @@ Item 4 and unsent audio in Application Support are the two patchy-data lessons f
 
 ## Next, in order
 
-1. **First compile.** Push, read the Build check, fix what the compiler finds. Expect a few errors: nothing in `Stow/` has been compiled.
+1. **First compile.** Done 2026-11-23. The first push built clean on Xcode 16.4, with one warning: `requestRecordPermission` on `AVAudioSession` is deprecated in iOS 17 in favour of the same call on `AVAudioApplication`. Swap it in the next change that touches `Recorder.swift`.
 2. **Signing and TestFlight.** After the steps in [signing.md](signing.md), add a release workflow that archives, signs with the App Store Connect API key and uploads.
 3. **First device test.** The list is below.
 4. **Polish.** Port `TranscriptionPolisher` and `PolishPresets` into `StowCore`, with the prompts generated from the Kotlin source and added to the drift check. Presets, auto-polish and the raw or polished toggle follow.
