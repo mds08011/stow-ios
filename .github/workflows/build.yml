@@ -1,0 +1,50 @@
+name: Build check
+
+# Compile-only verification. Does not sign, archive or upload anything, and needs no
+# secrets. It is also the only compiler this project has: the repo is written on a Linux
+# machine, where SwiftUI and AVFoundation do not exist.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  core:
+    # The plain-logic package. Runs on Linux as well, so it is cheap and fast.
+    runs-on: ubuntu-latest
+    container: swift:5.10
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v6
+
+      - name: StowCore unit tests
+        run: swift test --package-path StowCore
+
+  app:
+    # Standard macOS runners are free for a public repository.
+    runs-on: macos-15
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v6
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      # No signing identity exists here by design, so this proves the app compiles and
+      # links for a real device and nothing more.
+      - name: Build for iOS (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project Stow.xcodeproj \
+            -scheme Stow \
+            -configuration Debug \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            | tail -n 200
