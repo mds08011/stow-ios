@@ -170,3 +170,55 @@ public final class NoteStore {
         return decoder
     }()
 }
+
+/// Decides which completed recordings are safe to prune from disk.
+///
+/// Matches Android's policy: keep the newest 5 completed recordings for 7 days so a bad
+/// transcription can still be inspected, and never delete audio belonging to a note that
+/// has not yet been transcribed (`.waiting`, `.uploading`, or `.failed`).
+public enum AudioRetention {
+
+    public static let maxRetained = 5
+    public static let retentionSeconds: TimeInterval = 7 * 24 * 60 * 60
+
+    public struct StoredFile: Equatable {
+        public let name: String
+        public let modifiedAt: Date
+
+        public init(name: String, modifiedAt: Date) {
+            self.name = name
+            self.modifiedAt = modifiedAt
+        }
+    }
+
+    /// Returns file names that can be deleted.
+    public static func filesToDelete(
+        files: [StoredFile],
+        notes: [Note],
+        now: Date = Date(),
+        keepFileName: String? = nil,
+        maxRetained: Int = maxRetained,
+        retentionSeconds: TimeInterval = retentionSeconds
+    ) -> [String] {
+        var protected = Set(
+            notes
+                .filter { $0.status != .done }
+                .compactMap { $0.audioFileName }
+        )
+        if let keepFileName {
+            protected.insert(keepFileName)
+        }
+
+        let cutoff = now.addingTimeInterval(-retentionSeconds)
+        let recentKeep = Set(
+            files
+                .sorted { $0.modifiedAt > $1.modifiedAt }
+                .prefix(maxRetained)
+                .filter { $0.modifiedAt >= cutoff }
+                .map { $0.name }
+        )
+
+        let keep = protected.union(recentKeep)
+        return files.map { $0.name }.filter { !keep.contains($0) }
+    }
+}

@@ -198,3 +198,57 @@ final class NoteStoreTests: XCTestCase {
         XCTAssertEqual(store.secondsTranscribed(on: Date()), 100)
     }
 }
+
+final class AudioRetentionTests: XCTestCase {
+
+    func testProtectsUnsentAudioAndKeepsFiveRecentDoneFiles() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let files = (1...7).map { i in
+            AudioRetention.StoredFile(
+                name: "audio_\(i).m4a",
+                modifiedAt: now.addingTimeInterval(-Double(i) * 60)
+            )
+        } + [
+            AudioRetention.StoredFile(
+                name: "audio_old_failed.m4a",
+                modifiedAt: now.addingTimeInterval(-30 * 86_400)
+            ),
+            AudioRetention.StoredFile(
+                name: "audio_old_done.m4a",
+                modifiedAt: now.addingTimeInterval(-10 * 86_400)
+            )
+        ]
+
+        let notes = [
+            Note(id: "failed", durationSeconds: 30, status: .failed, audioFileName: "audio_old_failed.m4a"),
+            Note(id: "done", durationSeconds: 30, status: .done, audioFileName: "audio_old_done.m4a")
+        ]
+
+        let doomed = Set(AudioRetention.filesToDelete(files: files, notes: notes, now: now))
+
+        XCTAssertFalse(doomed.contains("audio_old_failed.m4a"))
+        XCTAssertTrue(doomed.contains("audio_old_done.m4a"))
+        XCTAssertTrue(doomed.contains("audio_6.m4a"))
+        XCTAssertTrue(doomed.contains("audio_7.m4a"))
+        for i in 1...5 {
+            XCTAssertFalse(doomed.contains("audio_\(i).m4a"))
+        }
+    }
+
+    func testKeepFileNameIsNeverDeleted() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let old = AudioRetention.StoredFile(
+            name: "audio_just_done.m4a",
+            modifiedAt: now.addingTimeInterval(-30 * 86_400)
+        )
+
+        let doomed = AudioRetention.filesToDelete(
+            files: [old],
+            notes: [],
+            now: now,
+            keepFileName: "audio_just_done.m4a"
+        )
+
+        XCTAssertTrue(doomed.isEmpty)
+    }
+}

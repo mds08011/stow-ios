@@ -29,6 +29,9 @@ final class Recorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
     /// from what happens to be connected.
     @Published private(set) var micLabel: String?
 
+    /// Called on the main queue if iOS terminates recording unexpectedly (e.g. encode error).
+    var onUnexpectedStop: ((String) -> Void)?
+
     private var recorder: AVAudioRecorder?
     private var fileName: String?
     private var timer: Timer?
@@ -53,7 +56,7 @@ final class Recorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
     /// Asks for the microphone if needed, then starts. Calls back on the main queue with
     /// nil on success or a message to show.
     func start(completion: @escaping (String?) -> Void) {
-        AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
+        AVAudioApplication.requestRecordPermission { [weak self] granted in
             DispatchQueue.main.async {
                 guard let self else { return }
                 guard granted else {
@@ -81,6 +84,7 @@ final class Recorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
         try session.setActive(true)
 
         let name = "audio_\(Int(Date().timeIntervalSince1970 * 1000)).m4a"
+        let url = Paths.recording(named: name)
         let settings: [String: Any] = [
             AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
             AVSampleRateKey: 16_000,
@@ -88,9 +92,10 @@ final class Recorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
             AVEncoderBitRateKey: 32_000,
             AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
         ]
-        let newRecorder = try AVAudioRecorder(url: Paths.recording(named: name), settings: settings)
+        let newRecorder = try AVAudioRecorder(url: url, settings: settings)
         newRecorder.delegate = self
         guard newRecorder.record() else {
+            try? FileManager.default.removeItem(at: url)
             throw NSError(
                 domain: "Stow",
                 code: 1,
@@ -125,6 +130,7 @@ final class Recorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
         // currentTime excludes paused stretches, so this is the audio actually captured.
         let duration = Int(recorder.currentTime.rounded())
         let label = micLabel
+        recorder.delegate = nil
         recorder.stop()
         teardown()
         return Finished(fileName: fileName, durationSeconds: duration, micLabel: label)
@@ -180,6 +186,9 @@ final class Recorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
             case .ended:
                 guard self.wasInterrupted else { return }
                 self.wasInterrupted = false
+                let rawOptions = info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+                let options = AVAudioSession.InterruptionOptions(rawValue: rawOptions)
+                guard options.contains(.shouldResume) else { return }
                 try? AVAudioSession.sharedInstance().setActive(true)
                 self.resume()
             @unknown default:
@@ -192,6 +201,27 @@ final class Recorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
         DispatchQueue.main.async {
             if self.state != .idle {
                 self.refreshMicLabel()
+            }
+        }
+    }
+
+    // MARK: AVAudioRecorderDelegate
+
+    func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
+        DispatchQueue.main.async {
+            guard self.state != .idle else { return }
+            self.teardown()
+            let detail = error?.localizedDescription ?? "unknown error"
+            self.onUnexpectedStop?("Recording stopped due to an audio error: \(detail)")
+        }
+    }
+
+    func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
+        DispatchQueue.main.async {
+            guard self.state != .idle else { return }
+            self.teardown()
+            if !flag {
+                self.onUnexpectedStop?("Recording stopped unexpectedly.")
             }
         }
     }

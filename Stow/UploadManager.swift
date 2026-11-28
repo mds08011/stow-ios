@@ -1,5 +1,6 @@
 import Foundation
 import StowCore
+import UIKit
 import UserNotifications
 
 extension Notification.Name {
@@ -25,7 +26,10 @@ final class UploadManager: NSObject, URLSessionDataDelegate {
     let store = NoteStore(fileURL: Paths.history)
 
     /// Handed over by the app delegate when iOS relaunches Stow for finished uploads.
-    var backgroundCompletionHandler: (() -> Void)?
+    private var backgroundCompletionHandler: (() -> Void)?
+    private var handlingBackgroundEvents = false
+
+    private static let pendingCopyKey = "pendingCopyNoteID"
 
     private var responseData: [Int: Data] = [:]
     private let dataLock = NSLock()
@@ -44,27 +48,66 @@ final class UploadManager: NSObject, URLSessionDataDelegate {
         return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
     }()
 
-    /// Reconnects to uploads that were running when Stow was last suspended or killed.
-    /// Call once at launch.
-    func start() {
-        session.getAllTasks { [weak self] tasks in
-            guard let self else { return }
-            let live = Set(tasks.compactMap { $0.taskDescription })
-            // A note marked uploading with no task behind it lost its upload, for
-            // instance because Stow was swiped away. Say so, and keep the audio.
-            for note in self.store.all() where note.status == .uploading && !live.contains(note.id) {
-                self.store.update(id: note.id) {
-                    $0.status = .failed
-                    $0.errorMessage = "The upload was interrupted. The audio was kept."
+    /// Re-attaches the background session delegate without running an orphan sweep.
+    func attachBackgroundSession() {
+        _ = session
+    }
+
+    /// Called by `AppDelegate` when iOS relaunches Stow for finished background uploads.
+    /// Does not sweep orphans yet: finished tasks may already be out of `getAllTasks`
+    /// while their completion callbacks are still being delivered.
+    func beginBackgroundEvents(completionHandler: @escaping () -> Void) {
+        backgroundCompletionHandler = completionHandler
+        handlingBackgroundEvents = true
+        _ = session
+    }
+
+    /// Marks any `.uploading` note whose system task disappeared (e.g. after Stow was
+    /// swiped away) as `.failed` while keeping its audio. Foreground-only so it cannot
+    /// race with background completion delivery.
+    func reconcileOrphans() {
+        DispatchQueue.main.async {
+            guard !self.handlingBackgroundEvents else { return }
+            self.session.getAllTasks { [weak self] tasks in
+                guard let self else { return }
+                let live = Set(tasks.compactMap { $0.taskDescription })
+                DispatchQueue.main.async {
+                    guard !self.handlingBackgroundEvents else { return }
+                    var changed = false
+                    for note in self.store.all() where note.status == .uploading && !live.contains(note.id) {
+                        self.store.update(id: note.id) {
+                            $0.status = .failed
+                            $0.errorMessage = "The upload was interrupted. The audio was kept."
+                        }
+                        changed = true
+                    }
+                    if changed {
+                        self.announceChange()
+                    }
                 }
             }
-            self.announceChange()
         }
+    }
+
+    func consumePendingCopyNoteID() -> String? {
+        let id = UserDefaults.standard.string(forKey: Self.pendingCopyKey)
+        if id != nil {
+            UserDefaults.standard.removeObject(forKey: Self.pendingCopyKey)
+        }
+        return id
+    }
+
+    func clearPendingCopyNoteID() {
+        UserDefaults.standard.removeObject(forKey: Self.pendingCopyKey)
     }
 
     /// Queues one note's audio for transcription. Safe to call for any number of notes.
     func enqueue(noteID: String, apiKey: String, jargon: String) {
         guard let note = store.note(id: noteID), let fileName = note.audioFileName else { return }
+        // Guard against double taps creating two tasks that overwrite the same outbox file,
+        // and refuse to burn a rate-limit slot before Groq's Retry-After has elapsed.
+        guard note.status != .uploading else { return }
+        if let retryAt = note.retryAt, retryAt > Date() { return }
         let audioURL = Paths.recording(named: fileName)
 
         guard FileManager.default.fileExists(atPath: audioURL.path) else {
@@ -153,7 +196,7 @@ final class UploadManager: NSObject, URLSessionDataDelegate {
             return
         }
 
-        store.update(id: noteID) {
+        let saved = store.update(id: noteID) {
             $0.status = .done
             $0.rawText = parsed.text.trimmingCharacters(in: .whitespacesAndNewlines)
             $0.avgLogprob = parsed.avgLogprob
@@ -162,18 +205,44 @@ final class UploadManager: NSObject, URLSessionDataDelegate {
             $0.errorMessage = nil
             $0.retryAt = nil
         }
+        UserDefaults.standard.set(noteID, forKey: Self.pendingCopyKey)
+        pruneAudioCache(keepFileName: saved?.audioFileName)
         announceChange()
         notifyReady(preview: parsed.text)
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         DispatchQueue.main.async {
+            self.handlingBackgroundEvents = false
             self.backgroundCompletionHandler?()
             self.backgroundCompletionHandler = nil
         }
     }
 
     // MARK: Helpers
+
+    private func pruneAudioCache(keepFileName: String?) {
+        let fm = FileManager.default
+        guard let urls = try? fm.contentsOfDirectory(
+            at: Paths.recordings,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        let stored: [AudioRetention.StoredFile] = urls.compactMap { url in
+            guard url.pathExtension.lowercased() == "m4a" else { return nil }
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
+            return AudioRetention.StoredFile(name: url.lastPathComponent, modifiedAt: modified)
+        }
+        let doomed = AudioRetention.filesToDelete(
+            files: stored,
+            notes: store.all(),
+            keepFileName: keepFileName
+        )
+        for name in doomed {
+            try? fm.removeItem(at: Paths.recording(named: name))
+        }
+    }
 
     private func fail(_ noteID: String, _ message: String) {
         store.update(id: noteID) {
@@ -189,13 +258,17 @@ final class UploadManager: NSObject, URLSessionDataDelegate {
         }
     }
 
-    /// A banner for when the transcription lands while Stow is not on screen. iOS shows
-    /// nothing for a foreground app unless asked to, which is the behaviour wanted here.
+    /// A banner for when the transcription lands while Stow is not on screen. Skipped when
+    /// Stow is already active so completed notes do not clutter Notification Center.
     private func notifyReady(preview: String) {
-        let content = UNMutableNotificationContent()
-        content.title = "Transcription ready"
-        content.body = String(preview.prefix(120))
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
+        DispatchQueue.main.async {
+            guard UIApplication.shared.applicationState != .active else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "Transcription ready"
+            content.body = String(preview.prefix(120))
+            content.sound = .default
+            let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+            UNUserNotificationCenter.current().add(request)
+        }
     }
 }

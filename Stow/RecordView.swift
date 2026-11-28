@@ -31,13 +31,36 @@ private struct RecordScreen: View {
                     .font(.footnote)
                     .foregroundStyle(.red)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            } else if let notice = model.statusNotice {
+                Text(notice)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             resultArea
 
             if model.waitingCount > 0 && recorder.state == .idle {
-                Button("Send \(model.waitingCount) waiting") { model.sendAllWaiting() }
-                    .buttonStyle(.bordered)
+                if let retryAt = model.earliestPendingRetryAt {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        let ready = model.readyWaitingCount(at: context.date)
+                        let remaining = Int(retryAt.timeIntervalSince(context.date).rounded(.up))
+                        if ready > 0 {
+                            Button("Send \(ready) waiting") { model.sendAllWaiting() }
+                                .buttonStyle(.bordered)
+                        } else if remaining > 0 {
+                            Button("Retry in \(NoteCard.formatWait(remaining))") {}
+                                .buttonStyle(.bordered)
+                                .disabled(true)
+                        } else {
+                            Button("Send \(model.waitingCount) waiting") { model.sendAllWaiting() }
+                                .buttonStyle(.bordered)
+                        }
+                    }
+                } else {
+                    Button("Send \(model.waitingCount) waiting") { model.sendAllWaiting() }
+                        .buttonStyle(.bordered)
+                }
             }
 
             Text(usageLine)
@@ -160,8 +183,22 @@ struct NoteCard: View {
                 Spacer()
                 Text(note.errorMessage ?? "The upload failed. The audio was kept.")
                     .foregroundStyle(.red)
-                Button("Send again") { model.send(note.id) }
-                    .buttonStyle(.borderedProminent)
+                if let retryAt = note.retryAt {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        let remaining = Int(retryAt.timeIntervalSince(context.date).rounded(.up))
+                        if remaining > 0 {
+                            Button("Retry in \(Self.formatWait(remaining))") {}
+                                .buttonStyle(.borderedProminent)
+                                .disabled(true)
+                        } else {
+                            Button("Send again") { model.send(note.id) }
+                                .buttonStyle(.borderedProminent)
+                        }
+                    }
+                } else {
+                    Button("Send again") { model.send(note.id) }
+                        .buttonStyle(.borderedProminent)
+                }
                 Spacer()
 
             case .done:
@@ -189,5 +226,12 @@ struct NoteCard: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    static func formatWait(_ seconds: Int) -> String {
+        if seconds < 60 { return "\(seconds)s" }
+        let minutes = seconds / 60
+        let remainder = seconds % 60
+        return remainder > 0 ? "\(minutes)m \(remainder)s" : "\(minutes)m"
     }
 }

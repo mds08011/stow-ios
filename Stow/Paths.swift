@@ -11,12 +11,12 @@ enum Paths {
     }
 
     static var recordings: URL {
-        ensure(root.appendingPathComponent("recordings", isDirectory: true))
+        ensure(root.appendingPathComponent("recordings", isDirectory: true), excludeFromBackup: true)
     }
 
     /// Multipart bodies waiting on the background uploader. Deleted when a task finishes.
     static var outbox: URL {
-        ensure(root.appendingPathComponent("outbox", isDirectory: true))
+        ensure(root.appendingPathComponent("outbox", isDirectory: true), excludeFromBackup: true)
     }
 
     static var history: URL {
@@ -27,8 +27,16 @@ enum Paths {
         recordings.appendingPathComponent(fileName)
     }
 
-    private static func ensure(_ url: URL) -> URL {
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
+    private static func ensure(_ url: URL, excludeFromBackup: Bool = false) -> URL {
+        var target = url
+        try? FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        if excludeFromBackup {
+            // Audio and temporary upload bodies are large, short-lived, and may hold other
+            // people's voices, so keep them out of iCloud Backup (matching Android's rules).
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try? target.setResourceValues(values)
+        }
+        return target
     }
 }

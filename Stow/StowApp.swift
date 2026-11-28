@@ -11,12 +11,11 @@ struct StowApp: App {
         WindowGroup {
             RecordView()
                 .environmentObject(model)
-                .onChange(of: scenePhase) { _, phase in
+                .onChange(of: scenePhase, initial: true) { _, phase in
                     if phase == .active {
                         // Uploads may have finished, and the timer was asleep, while
                         // Stow was in the background or the phone was locked.
-                        model.reload()
-                        model.recorder.refreshElapsed()
+                        model.handleForegroundActive()
                     }
                 }
         }
@@ -37,7 +36,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             completionHandler()
             return
         }
-        UploadManager.shared.backgroundCompletionHandler = completionHandler
-        UploadManager.shared.start()
+        UploadManager.shared.beginBackgroundEvents(completionHandler: completionHandler)
     }
 }
